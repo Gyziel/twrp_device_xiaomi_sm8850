@@ -1,23 +1,123 @@
-name: TWRP Actions Diagnostic
+name: TWRP Xiaomi 17 Pro - CI verification and recovery build
 
 on:
   workflow_dispatch:
   push:
-    branches: [twrp-16.0]
+    branches:
+      - twrp-16.0
     paths:
-      - .github/workflows/diagnostic.yml
+      - '.github/workflows/diagnostic.yml'
 
 permissions:
   contents: read
 
 jobs:
   diagnostic:
+    name: Check Actions runner
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Verify GitHub Actions
         run: |
-          echo "Actions workflow is enabled."
+          set -e
+          echo "GitHub Actions runner is working."
           echo "Repository: $GITHUB_REPOSITORY"
           echo "Branch: $GITHUB_REF_NAME"
-          echo "SHA: $GITHUB_SHA"
+          test "$GITHUB_REF_NAME" = "twrp-16.0"
+
+  build:
+    name: Build sm8850 TWRP recovery (UNTESTED on pandora)
+    needs: diagnostic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    env:
+      ALLOW_MISSING_DEPENDENCIES: 'true'
+      DEVICE_PATH: device/xiaomi/sm8850
+      TWRP_BRANCH: twrp-16.0
+    steps:
+      - name: Inspect runner
+        run: |
+          set -euo pipefail
+          echo "Source commit: $GITHUB_SHA"
+          df -h .
+
+      - name: Free up build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Install prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y repo git git-lfs zip unzip lz4 zstd bc bison flex ccache
+          git config --global user.name 'Gyziel TWRP Builder'
+          git config --global user.email 'actions@users.noreply.github.com'
+          df -h .
+
+      - name: Download TWRP source
+        run: |
+          set -euo pipefail
+          repo init --depth=1 -u https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git -b "$TWRP_BRANCH"
+          repo sync -c -j4 --no-tags --no-clone-bundle --fail-fast
+          df -h .
+
+      - name: Clone this device tree from this fork
+        run: |
+          set -euo pipefail
+          mkdir -p device/xiaomi
+          git clone --depth=1 --single-branch -b "$TWRP_BRANCH" "https://github.com/$GITHUB_REPOSITORY.git" "$DEVICE_PATH"
+          cd "$DEVICE_PATH"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach "$GITHUB_SHA"
+          test -s prebuilt/kernel
+          test -f BoardConfig.mk
+          grep -q 'PRODUCT_NAME := twrp_sm8850' twrp_sm8850.mk
+          grep -q 'BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true' BoardConfig.mk
+          echo "Shared SM8850 tree includes pandora in README, but is not validated for Android 17."
+
+      - name: Compile recovery.img
+        run: |
+          set -eo pipefail
+          export USE_CCACHE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_EXEC="$(command -v ccache)"
+          ccache -M 5G
+          source build/envsetup.sh
+          lunch twrp_sm8850
+          m -j2 recoveryimage
+
+      - name: Verify and label artifact
+        run: |
+          set -euo pipefail
+          IMAGE=out/target/product/sm8850/recovery.img
+          test -s "$IMAGE"
+          SIZE=$(stat -c%s "$IMAGE")
+          test "$SIZE" -le 104857600 || { echo "Recovery image exceeds configured 100 MiB partition size"; exit 1; }
+          mkdir -p twrp-artifact
+          cp "$IMAGE" twrp-artifact/TWRP-16-sm8850-UNTESTED.img
+          (
+            cd twrp-artifact
+            sha256sum TWRP-16-sm8850-UNTESTED.img > SHA256SUMS.txt
+          )
+          {
+            echo "Xiaomi 17 Pro (pandora), shared sm8850 tree"
+            echo "TWRP branch: twrp-16.0"
+            echo "Source commit: $GITHUB_SHA"
+            echo "WARNING: Not verified on HyperOS 4 / Android 17. Do not flash before device-specific review."
+          } > twrp-artifact/BUILD-INFO.txt
+
+      - name: Upload untested image as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-16-sm8850-UNTESTED
+          path: twrp-artifact/
+          if-no-files-found: error
+          retention-days: 14
