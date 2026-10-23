@@ -127,3 +127,5 @@ jobs:
           path: twrp-artifact/
           if-no-files-found: error
           retention-days: 14
+
+# Push trigger check after enabling Actions; manually dispatched runs remain supported.
