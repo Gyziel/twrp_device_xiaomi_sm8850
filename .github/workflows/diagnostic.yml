@@ -83,16 +83,33 @@ jobs:
           grep -q 'BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true' BoardConfig.mk
           echo "Shared SM8850 tree includes pandora in README, but is not validated for Android 17."
 
-      - name: Compile recovery.img
+      - name: Compile recovery.img (limited parallelism and persistent log)
         run: |
           set -eo pipefail
-          export USE_CCACHE=1
-          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          export CCACHE_EXEC="$(command -v ccache)"
-          ccache -M 5G
-          source build/envsetup.sh
-          lunch twrp_sm8850
-          m -j2 recoveryimage
+          {
+            echo "Build started: $(date -u -Is)"
+            echo "Disk and memory:"
+            df -h .
+            free -h
+            swapon --show
+            export USE_CCACHE=1
+            export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+            export CCACHE_EXEC="$(command -v ccache)"
+            ccache -M 5G
+            source build/envsetup.sh
+            lunch twrp_sm8850
+            echo "Compiling recoveryimage with one job to reduce memory pressure."
+            m -j1 recoveryimage
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Upload compile log (including failed attempts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-build-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Verify and label artifact
         run: |
