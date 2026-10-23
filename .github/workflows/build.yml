@@ -89,7 +89,7 @@ jobs:
 
       - name: Build recovery image
         run: |
-          set -euo pipefail
+          set -eo pipefail
           export USE_CCACHE=1
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
           export CCACHE_EXEC="$(command -v ccache)"
@@ -103,6 +103,8 @@ jobs:
           set -euo pipefail
           IMAGE="out/target/product/$DEVICE_NAME/recovery.img"
           test -s "$IMAGE" || { echo "Missing or empty recovery.img"; exit 1; }
+          SIZE=$(stat -c%s "$IMAGE")
+          test "$SIZE" -le 104857600 || { echo "Recovery exceeds the configured 100MiB partition size: $SIZE"; exit 1; }
           mkdir -p twrp-artifact
           cp "$IMAGE" twrp-artifact/TWRP-16-sm8850-UNTESTED.img
           (cd twrp-artifact && sha256sum TWRP-16-sm8850-UNTESTED.img > SHA256SUMS.txt)
