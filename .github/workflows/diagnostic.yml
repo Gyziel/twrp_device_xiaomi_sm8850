@@ -73,7 +73,7 @@ jobs:
           swapon --show
           echo "ZRAM devices:"
           zramctl
-          swapon --noheadings --raw -o NAME | grep -q '^/dev/zram' || {
+          swapon --show=NAME --noheadings | grep -Eq '^/dev/zram[0-9]+' || {
             echo "::error::ZRAM did not activate; fail early rather than OOM during recovery compilation"
             exit 1
           }
