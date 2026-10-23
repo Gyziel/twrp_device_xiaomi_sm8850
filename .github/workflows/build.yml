@@ -1,148 +1,127 @@
-name: TWRP 16 Builder
+name: Build TWRP 16 - Xiaomi 17 Pro (UNTESTED)
 
 on:
   workflow_dispatch:
-    inputs:
-      TWRP_MANIFEST_URL:
-        description: "TWRP manifest url"
-        required: true
-        default: "https://github.com/TWRP-Test/platform_manifest_twrp_aosp"
-      TWRP_MANIFEST_BRANCH:
-        description: "TWRP branch"
-        required: true
-        default: "twrp-16.0"
-      DEVICE_TREE_URL:
-        description: "Device tree url"
-        required: true
-        default: "https://github.com/YuKongA/twrp_device_xiaomi_sm8850"
-      DEVICE_TREE_BRANCH:
-        description: "Device tree branch"
-        required: true
-        default: "twrp-16.0"
-      DEVICE_PATH:
-        description: "Device path device/"
-        required: true
-        default: "xiaomi/sm8850"
-      DEVICE_NAME:
-        description: "Device name"
-        required: true
-        default: "sm8850"
-      LUNCH_TARGET:
-        description: "lunch twrp_ (default same as device name)"
-        required: false
-        default: ""
-      BUILD_PARTITION:
-        description: "Build partition"
-        required: true
-        default: "recovery"
+  push:
+    branches:
+      - twrp-16.0
+    paths:
+      - '.github/workflows/build.yml'
+      - 'BoardConfig.mk'
+      - 'AndroidProducts.mk'
+      - 'twrp_sm8850.mk'
+      - 'device.mk'
+      - 'recovery.fstab'
+      - 'prebuilt/**'
+      - 'recovery/**'
+      - 'security/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: twrp-sm8850-build
+  cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    name: TWRP 16 / sm8850 / pandora candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      ALLOW_MISSING_DEPENDENCIES: 'true'
+      DEVICE_PATH: device/xiaomi/sm8850
+      DEVICE_NAME: sm8850
+      BRANCH_NAME: twrp-16.0
+      TWRP_MANIFEST: https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git
     steps:
-    - name: Show build info
-      run: |
-        if [ -n "${{ github.event.inputs.LUNCH_TARGET }}" ]; then
-          echo "LUNCH_TARGET=${{ github.event.inputs.LUNCH_TARGET }}" >> "$GITHUB_ENV"
-        else
-          echo "LUNCH_TARGET=${{ github.event.inputs.DEVICE_NAME }}" >> "$GITHUB_ENV"
-        fi
-        {
-          echo 'BUILD_INFO<<EOF'
-          echo
-          echo Manifest url: ${{ github.event.inputs.TWRP_MANIFEST_URL }}
-          echo Manifest branch: ${{ github.event.inputs.TWRP_MANIFEST_BRANCH }}
-          echo Device tree url: ${{ github.event.inputs.DEVICE_TREE_URL }}
-          echo Device tree branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}
-          echo Device path: ${{ github.event.inputs.DEVICE_PATH }}
-          echo Device name: ${{ github.event.inputs.DEVICE_NAME }}
-          echo Lunch target: ${{ github.event.inputs.LUNCH_TARGET }}
-          echo Build target: ${{ github.event.inputs.BUILD_PARTITION }}.img
-          echo Build date: `date`
-          echo
-          echo EOF
-        } >> "$GITHUB_ENV"
-        echo BUILD_DATE=`date +%F` >> "$GITHUB_ENV"
-        echo "REPO_NAME=$(basename ${{ github.event.inputs.TWRP_MANIFEST_URL }})" >> "$GITHUB_ENV"
+      - name: Verify build target
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = "$BRANCH_NAME"
+          test "$GITHUB_REPOSITORY" = "Gyziel/twrp_device_xiaomi_sm8850"
+          echo "Building $GITHUB_REPOSITORY at $GITHUB_SHA"
+          echo "WARNING: Android 16 recovery source has not been tested on HyperOS 4 / Android 17."
+          df -h .
 
-    - name: Cleanup
-      uses: rokibhasansagar/slimhub_actions@main
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
 
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y repo git git-lfs curl zip unzip lz4 zstd bc bison flex ccache
+          git config --global user.name 'Gyziel TWRP Builder'
+          git config --global user.email 'actions@users.noreply.github.com'
+          df -h .
 
-    - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        create-symlink: true
+      - name: Sync TWRP 16 source
+        run: |
+          set -euo pipefail
+          repo init --depth=1 -u "$TWRP_MANIFEST" -b "$BRANCH_NAME"
+          repo sync -c --no-tags --no-clone-bundle --fail-fast -j4
+          df -h .
 
-    - name: Setup zram
-      run: |
-        sudo apt install linux-modules-extra-$(uname -r) zram-tools -y
-        sudo modprobe zram
-        sudo sed -i 's/^#PERCENT=50/PERCENT=90/' /etc/default/zramswap
-        sudo sed -i 's/^#PRIORITY=100/PRIORITY=1000/' /etc/default/zramswap
-        sudo systemctl restart zramswap
-        zramctl
+      - name: Use this fork and exact commit
+        run: |
+          set -euo pipefail
+          mkdir -p device/xiaomi
+          git clone --depth=1 --single-branch -b "$BRANCH_NAME"             "https://github.com/$GITHUB_REPOSITORY.git" "$DEVICE_PATH"
+          cd "$DEVICE_PATH"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach "$GITHUB_SHA"
+          test -s prebuilt/kernel
+          test -f BoardConfig.mk
+          test -f twrp_sm8850.mk
+          grep -q 'PRODUCT_NAME := twrp_sm8850' twrp_sm8850.mk
+          grep -q 'BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true' BoardConfig.mk
+          echo "WARNING: SM8850 shared device tree, not a verified pandora-specific recovery."
 
-    - name: Setup environment
-      run: |
-        export DEBIAN_FRONTEND=noninteractive
-        sudo apt update && sudo apt upgrade -y
-        sudo apt install repo -y
-        git config --global user.name ${{ github.actor }}
-        git config --global user.email ${{ github.actor }}@users.noreply.github.com
+      - name: Build recovery image
+        run: |
+          set -euo pipefail
+          export USE_CCACHE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_EXEC="$(command -v ccache)"
+          ccache -M 5G
+          source build/envsetup.sh
+          lunch twrp_sm8850
+          m -j2 recoveryimage
 
-    - name: Sync source
-      run: |
-        repo init -u ${{ github.event.inputs.TWRP_MANIFEST_URL }} -b ${{ github.event.inputs.TWRP_MANIFEST_BRANCH }} --depth=1
-        (while true; do echo "Syncing source..."; sleep 60; done) &
-        TIP_PID=$!
-        repo sync
-        kill $TIP_PID && exit 0
+      - name: Check and package output
+        run: |
+          set -euo pipefail
+          IMAGE="out/target/product/$DEVICE_NAME/recovery.img"
+          test -s "$IMAGE" || { echo "Missing or empty recovery.img"; exit 1; }
+          mkdir -p twrp-artifact
+          cp "$IMAGE" twrp-artifact/TWRP-16-sm8850-UNTESTED.img
+          (cd twrp-artifact && sha256sum TWRP-16-sm8850-UNTESTED.img > SHA256SUMS.txt)
+          {
+            echo "Requested device: Xiaomi 17 Pro (pandora)"
+            echo "Build target: twrp_sm8850 (shared Xiaomi SM8850 tree)"
+            echo "Manifest: $TWRP_MANIFEST ($BRANCH_NAME, Android 16)"
+            echo "Device tree: https://github.com/$GITHUB_REPOSITORY"
+            echo "Source commit: $GITHUB_SHA"
+            echo "Actions run: $GITHUB_RUN_ID"
+            echo "UNTESTED on HyperOS 4 / Android 17. Do not flash without device-specific verification."
+          } > twrp-artifact/BUILD-INFO.txt
+          cat twrp-artifact/BUILD-INFO.txt
+          cat twrp-artifact/SHA256SUMS.txt
 
-    - name: Setup device
-      run: |
-        git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} device/${{ github.event.inputs.DEVICE_PATH }}
-
-    - name: Generate build info
-      run: |
-        echo -e "$BUILD_INFO" >> INFO.txt
-        echo "Change log:" >> INFO.txt
-        set +e
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
-        if [ $? -eq 0 ]; then
-          git log "$LAST_TAG"..HEAD --pretty=format:"- %h-%an: %s" >> INFO.txt
-        else
-          git log --pretty=format:"- %h-%an: %s" >> INFO.txt
-        fi
-        cat INFO.txt
-      working-directory: device/${{ github.event.inputs.DEVICE_PATH }}
-
-    - name: Build TWRP
-      run: |
-        source build/envsetup.sh
-        export ALLOW_MISSING_DEPENDENCIES=true
-        export CCACHE_DIR=.ccache
-        export CCACHE_EXEC=$(command -v ccache)        
-        export CCACHE_MAXSIZE=5G
-        export USE_CCACHE=1
-        lunch twrp_${{ env.LUNCH_TARGET }}
-        (while true; do echo `date +%T` "Building TWRP..."; free -h; sleep 10; done) &
-        TIP_PID=$!
-        m ${{ github.event.inputs.BUILD_PARTITION }}image
-        mv out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_PARTITION }}.img out/target/product/${{ github.event.inputs.DEVICE_NAME }}/TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}.img
-        kill $TIP_PID && exit 0        
-
-    - name: Upload to Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: | 
-          out/target/product/${{ github.event.inputs.DEVICE_NAME }}/TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}.img
-        name: TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}-${{ github.run_id }}
-        tag_name: ${{ env.BUILD_DATE }}-${{ github.run_id }}
-        body_path: device/${{ github.event.inputs.DEVICE_PATH }}/INFO.txt
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload test artifact (not a Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-16-sm8850-UNTESTED
+          path: twrp-artifact/
+          if-no-files-found: error
+          retention-days: 14
