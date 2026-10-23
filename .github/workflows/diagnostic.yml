@@ -83,31 +83,78 @@ jobs:
           grep -q 'BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true' BoardConfig.mk
           echo "Shared SM8850 tree includes pandora in README, but is not validated for Android 17."
 
-      - name: Compile recovery.img (limited parallelism and persistent log)
+      - name: Compile recovery.img with resource watchdog
         run: |
-          set -eo pipefail
+          set -uo pipefail
+          echo "Build start $(date -u -Is)"
+          df -h .
+          free -h
+          swapon --show
           {
-            echo "Build started: $(date -u -Is)"
-            echo "Disk and memory:"
-            df -h .
-            free -h
-            swapon --show
-            export USE_CCACHE=1
-            export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-            export CCACHE_EXEC="$(command -v ccache)"
-            ccache -M 5G
+            echo "Build on $GITHUB_REPOSITORY at commit $GITHUB_SHA"
+            echo "This log is preserved separately to keep the Actions live log small."
+          } > "$GITHUB_WORKSPACE/build.log"
+          echo "Resource telemetry $(date -u -Is)" > "$GITHUB_WORKSPACE/resource.log"
+          export USE_CCACHE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_EXEC="$(command -v ccache)"
+          ccache -M 5G
+          # A separate session permits terminating the compiler cleanly if the
+          # runner approaches disk or memory exhaustion.
+          setsid bash -c '
+            set -eo pipefail
             source build/envsetup.sh
             lunch twrp_sm8850
-            echo "Compiling recoveryimage with one job to reduce memory pressure."
             m -j1 recoveryimage
-          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          ' >> "$GITHUB_WORKSPACE/build.log" 2>&1 &
+          build_pid=$!
+          resource_abort=0
+          while kill -0 "$build_pid" 2>/dev/null; do
+            echo "==== $(date -u -Is) ====" | tee -a "$GITHUB_WORKSPACE/resource.log"
+            df -h . | tee -a "$GITHUB_WORKSPACE/resource.log"
+            free -m | tee -a "$GITHUB_WORKSPACE/resource.log"
+            disk_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+            mem_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+            swap_kb=$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)
+            if [ "$disk_kb" -lt 3145728 ]; then
+              echo "::error::Disk free below 3 GiB during compilation; stopping before the runner fails." | tee -a "$GITHUB_WORKSPACE/resource.log"
+              resource_abort=1
+              break
+            fi
+            if [ "$mem_kb" -lt 786432 ] && [ "$swap_kb" -lt 524288 ]; then
+              echo "::error::Available RAM below 768 MiB and free swap below 512 MiB; stopping before OOM." | tee -a "$GITHUB_WORKSPACE/resource.log"
+              resource_abort=1
+              break
+            fi
+            sleep 60
+          done
+          if [ "$resource_abort" -ne 0 ]; then
+            kill -TERM -- "-$build_pid" 2>/dev/null || true
+            sleep 5
+            kill -KILL -- "-$build_pid" 2>/dev/null || true
+          fi
+          wait "$build_pid"
+          code=$?
+          if [ "$resource_abort" -ne 0 ] && [ "$code" -eq 0 ]; then code=1; fi
+          echo "Compiler exit status: $code"
+          echo "Last 140 lines of compiler output:"
+          tail -n 140 "$GITHUB_WORKSPACE/build.log" || true
+          echo "Final resource snapshot:"
+          df -h .
+          free -m
+          if [ "$code" -ne 0 ]; then
+            echo "::error::recoveryimage failed, exit code $code; inspect TWRP-build-diagnostics artifact"
+          fi
+          exit "$code"
 
-      - name: Upload compile log (including failed attempts)
+      - name: Upload compiler and resource logs (even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TWRP-build-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build.log
+          name: TWRP-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build.log
+            resource.log
           if-no-files-found: warn
           retention-days: 14
 
